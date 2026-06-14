@@ -579,3 +579,192 @@ func TestConvertOpenAIRequestToClaude_UnsupportedNativeContentBlocksStillIgnored
 		t.Fatalf("content[0].text = %q, want keep me; content=%s", got, content.Raw)
 	}
 }
+
+func TestConvertOpenAIRequestToClaude_PreservesThinkingBlocksOnAssistantTurn(t *testing.T) {
+	inputJSON := `{
+		"model": "clip-claude-opus-4-8-xhigh",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "thinking", "thinking": "Let me inspect the file.", "signature": "sig-abc"},
+					{"type": "redacted_thinking", "data": "redacted-xyz"},
+					{"type": "text", "text": "I will read it."},
+					{"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {"file_path": "main.go"}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "toolu_1", "content": [{"type": "text", "text": "package main"}]}
+				]
+			}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-opus-4-8", []byte(inputJSON), true)
+	content := gjson.ParseBytes(result).Get("messages.0.content")
+
+	if got := len(content.Array()); got != 4 {
+		t.Fatalf("assistant content length = %d, want 4; content=%s", got, content.Raw)
+	}
+	if got := content.Get("0.type").String(); got != "thinking" {
+		t.Fatalf("content[0].type = %q, want thinking; content=%s", got, content.Raw)
+	}
+	if got := content.Get("0.thinking").String(); got != "Let me inspect the file." {
+		t.Fatalf("content[0].thinking = %q; content=%s", got, content.Raw)
+	}
+	if got := content.Get("0.signature").String(); got != "sig-abc" {
+		t.Fatalf("content[0].signature = %q, want sig-abc; content=%s", got, content.Raw)
+	}
+	if got := content.Get("1.type").String(); got != "redacted_thinking" {
+		t.Fatalf("content[1].type = %q, want redacted_thinking; content=%s", got, content.Raw)
+	}
+	if got := content.Get("1.data").String(); got != "redacted-xyz" {
+		t.Fatalf("content[1].data = %q, want redacted-xyz; content=%s", got, content.Raw)
+	}
+	if got := content.Get("3.type").String(); got != "tool_use" {
+		t.Fatalf("content[3].type = %q, want tool_use; content=%s", got, content.Raw)
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_ThinkingBlockDroppedOnUserTurn(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-opus-4-8",
+		"messages": [
+			{
+				"role": "user",
+				"content": [
+					{"type": "thinking", "thinking": "spoofed", "signature": "x"},
+					{"type": "text", "text": "hello"}
+				]
+			}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-opus-4-8", []byte(inputJSON), false)
+	content := gjson.ParseBytes(result).Get("messages.0.content")
+
+	if got := len(content.Array()); got != 1 {
+		t.Fatalf("user content length = %d, want 1; content=%s", got, content.Raw)
+	}
+	if got := content.Get("0.type").String(); got != "text" {
+		t.Fatalf("content[0].type = %q, want text; content=%s", got, content.Raw)
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_PreservesServerToolHistoryOnAssistantTurn(t *testing.T) {
+	inputJSON := `{
+		"model": "clip-claude-opus-4-8-xhigh",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "server_tool_use", "id": "srvtool_1", "name": "web_search", "input": {"query": "golang"}},
+					{"type": "web_search_tool_result", "tool_use_id": "srvtool_1", "content": [{"type": "web_search_result", "title": "Go", "url": "https://go.dev"}]},
+					{"type": "text", "text": "Found it."}
+				]
+			}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-opus-4-8", []byte(inputJSON), true)
+	content := gjson.ParseBytes(result).Get("messages.0.content")
+
+	if got := len(content.Array()); got != 3 {
+		t.Fatalf("assistant content length = %d, want 3; content=%s", got, content.Raw)
+	}
+	if got := content.Get("0.type").String(); got != "server_tool_use" {
+		t.Fatalf("content[0].type = %q, want server_tool_use; content=%s", got, content.Raw)
+	}
+	if got := content.Get("0.name").String(); got != "web_search" {
+		t.Fatalf("content[0].name = %q, want web_search; content=%s", got, content.Raw)
+	}
+	if got := content.Get("1.type").String(); got != "web_search_tool_result" {
+		t.Fatalf("content[1].type = %q, want web_search_tool_result; content=%s", got, content.Raw)
+	}
+	if got := content.Get("1.content.0.url").String(); got != "https://go.dev" {
+		t.Fatalf("content[1].content[0].url = %q; content=%s", got, content.Raw)
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_ParallelToolResultsGroupedIntoOneUserTurn(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-4.1",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": null,
+				"tool_calls": [
+					{"id": "call_a", "type": "function", "function": {"name": "Read", "arguments": "{\"file_path\":\"a.go\"}"}},
+					{"id": "call_b", "type": "function", "function": {"name": "Read", "arguments": "{\"file_path\":\"b.go\"}"}}
+				]
+			},
+			{"role": "tool", "tool_call_id": "call_a", "content": "contents of a"},
+			{"role": "tool", "tool_call_id": "call_b", "content": "contents of b"}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-opus-4-8", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages")
+
+	if got := len(messages.Array()); got != 2 {
+		t.Fatalf("messages length = %d, want 2 (assistant + grouped user); messages=%s", got, messages.Raw)
+	}
+	if got := messages.Get("1.role").String(); got != "user" {
+		t.Fatalf("messages[1].role = %q, want user; messages=%s", got, messages.Raw)
+	}
+	userContent := messages.Get("1.content")
+	if got := len(userContent.Array()); got != 2 {
+		t.Fatalf("grouped user content length = %d, want 2; content=%s", got, userContent.Raw)
+	}
+	if got := userContent.Get("0.tool_use_id").String(); got != "call_a" {
+		t.Fatalf("content[0].tool_use_id = %q, want call_a; content=%s", got, userContent.Raw)
+	}
+	if got := userContent.Get("1.tool_use_id").String(); got != "call_b" {
+		t.Fatalf("content[1].tool_use_id = %q, want call_b; content=%s", got, userContent.Raw)
+	}
+	if got := userContent.Get("1.content").String(); got != "contents of b" {
+		t.Fatalf("content[1].content = %q, want contents of b; content=%s", got, userContent.Raw)
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_ToolResultFollowedByUserTextStartsNewTurn(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-4.1",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": null,
+				"tool_calls": [
+					{"id": "call_a", "type": "function", "function": {"name": "Read", "arguments": "{}"}}
+				]
+			},
+			{"role": "tool", "tool_call_id": "call_a", "content": "result a"},
+			{"role": "user", "content": "now do something else"},
+			{"role": "tool", "tool_call_id": "call_b", "content": "result b"}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-opus-4-8", []byte(inputJSON), false)
+	messages := gjson.ParseBytes(result).Get("messages")
+
+	// assistant, user(tool_result a), user(text), user(tool_result b) -> 4 turns;
+	// tool_result b must NOT merge into the text user turn.
+	if got := len(messages.Array()); got != 4 {
+		t.Fatalf("messages length = %d, want 4; messages=%s", got, messages.Raw)
+	}
+	if got := messages.Get("1.content.0.type").String(); got != "tool_result" {
+		t.Fatalf("messages[1].content[0].type = %q, want tool_result; messages=%s", got, messages.Raw)
+	}
+	if got := messages.Get("2.content.0.type").String(); got != "text" {
+		t.Fatalf("messages[2].content[0].type = %q, want text; messages=%s", got, messages.Raw)
+	}
+	if got := messages.Get("3.content.0.type").String(); got != "tool_result" {
+		t.Fatalf("messages[3].content[0].type = %q, want tool_result; messages=%s", got, messages.Raw)
+	}
+	if got := messages.Get("3.content.0.tool_use_id").String(); got != "call_b" {
+		t.Fatalf("messages[3].content[0].tool_use_id = %q, want call_b; messages=%s", got, messages.Raw)
+	}
+}

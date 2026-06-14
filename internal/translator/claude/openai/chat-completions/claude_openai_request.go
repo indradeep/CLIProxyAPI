@@ -250,16 +250,28 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 				toolCallID := message.Get("tool_call_id").String()
 				toolContentResult := message.Get("content")
 
-				msg := []byte(`{"role":"user","content":[{"type":"tool_result","tool_use_id":"","content":""}]}`)
-				msg, _ = sjson.SetBytes(msg, "content.0.tool_use_id", toolCallID)
+				toolResultBlock := []byte(`{"type":"tool_result","tool_use_id":"","content":""}`)
+				toolResultBlock, _ = sjson.SetBytes(toolResultBlock, "tool_use_id", toolCallID)
 				toolResultContent, toolResultContentRaw := convertOpenAIToolResultContent(toolContentResult)
 				if toolResultContentRaw {
-					msg, _ = sjson.SetRawBytes(msg, "content.0.content", []byte(toolResultContent))
+					toolResultBlock, _ = sjson.SetRawBytes(toolResultBlock, "content", []byte(toolResultContent))
 				} else {
-					msg, _ = sjson.SetBytes(msg, "content.0.content", toolResultContent)
+					toolResultBlock, _ = sjson.SetBytes(toolResultBlock, "content", toolResultContent)
 				}
-				out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
-				messageIndex++
+
+				// Claude requires all tool_result blocks answering the preceding
+				// assistant tool_use turn to share one user message. Consecutive
+				// OpenAI role:"tool" messages (parallel tool calls) must be grouped
+				// into the prior user turn instead of emitting a separate turn each.
+				if lastIdx := lastToolResultTurnIndex(out); lastIdx >= 0 {
+					path := fmt.Sprintf("messages.%d.content.-1", lastIdx)
+					out, _ = sjson.SetRawBytes(out, path, toolResultBlock)
+				} else {
+					msg := []byte(`{"role":"user","content":[]}`)
+					msg, _ = sjson.SetRawBytes(msg, "content.-1", toolResultBlock)
+					out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
+					messageIndex++
+				}
 			}
 			return true
 		})
@@ -481,6 +493,14 @@ func convertOpenAIContentPartToClaudePart(part gjson.Result, role string) string
 		if role == "user" {
 			return convertClaudeNativeToolResultPart(part)
 		}
+
+	case "thinking", "redacted_thinking", "server_tool_use", "web_search_tool_result", "code_execution_tool_result":
+		// Claude-native history blocks. Anthropic requires prior thinking and
+		// server-tool blocks to be returned unchanged on follow-up tool-result
+		// requests, so pass them through verbatim on assistant turns.
+		if role == "assistant" {
+			return part.Raw
+		}
 	}
 
 	return ""
@@ -529,6 +549,37 @@ func convertClaudeNativeToolResultPart(part gjson.Result) string {
 	}
 	toolResult = copyClaudeCacheControl(toolResult, part)
 	return string(toolResult)
+}
+
+// lastToolResultTurnIndex returns the index of the most recently emitted message
+// when it is a user turn whose last content block is a tool_result, or -1
+// otherwise. Used to group consecutive OpenAI role:"tool" messages (parallel
+// tool calls) into a single Claude user turn, as Claude requires.
+func lastToolResultTurnIndex(out []byte) int {
+	messages := gjson.GetBytes(out, "messages")
+	if !messages.IsArray() {
+		return -1
+	}
+	arr := messages.Array()
+	if len(arr) == 0 {
+		return -1
+	}
+	last := arr[len(arr)-1]
+	if last.Get("role").String() != "user" {
+		return -1
+	}
+	content := last.Get("content")
+	if !content.IsArray() {
+		return -1
+	}
+	parts := content.Array()
+	if len(parts) == 0 {
+		return -1
+	}
+	if parts[len(parts)-1].Get("type").String() != "tool_result" {
+		return -1
+	}
+	return len(arr) - 1
 }
 
 func copyClaudeCacheControl(dst []byte, src gjson.Result) []byte {

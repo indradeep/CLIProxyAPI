@@ -200,6 +200,62 @@ When debugging Claude regressions, check that:
 
 For GPT-family models, the request shape is usually standard OpenAI chat or responses-style payload. Use GPT request logs as the control group before changing Claude-only translators.
 
+### Claude Context and Long-Request Findings
+
+Latest verified findings from 2026-06-14 Cursor Claude tracing:
+
+- Cursor may keep sending `max_tokens: 4096` even for `clip-claude-opus-4-8-xhigh`.
+- The local payload overrides can and should win upstream. The active config currently sets Claude caps by alias class:
+  - standard/base: `max_tokens: 8192`
+  - `high`: `max_tokens: 16384`
+  - `xhigh`: `max_tokens: 32768`
+  - `max`: `max_tokens: 65536`
+- Verify both downstream and upstream values. A healthy xhigh translation can show downstream `4096` and upstream `32768` in the same request log.
+- Prompt caching is working when `cache_read_input_tokens` is high. This reduces input processing/cost, but it does not prevent long hidden-thinking phases.
+- A held Cursor request is not automatically a proxy deadlock. In-flight Claude streams may sit at:
+  - HTTP `200`
+  - `event: message_start`
+  - `content_block_start` with `type: "thinking"`
+  - repeated `event: ping`
+  before later emitting `content_block_delta` text and finishing.
+
+Concrete example: request `2dd2c1af` in `v1-chat-completions-2026-06-14T134554-2dd2c1af.log` started at `13:41:41` and completed at `13:45:54`:
+
+- `main.log`: `200 | 4m13s`
+- downstream model: `clip-claude-opus-4-8-xhigh`
+- downstream `max_tokens`: `4096`
+- upstream model: `claude-opus-4-8`
+- upstream `max_tokens`: `32768`
+- upstream `thinking`: `{"type":"adaptive"}`
+- upstream `output_config.effort`: `xhigh`
+- finish reason: `stop`
+- prompt tokens: `115706`
+- cached prompt tokens: `113210`
+- completion/output tokens: `18717`
+- thinking tokens: `15484`
+- visible/non-thinking output tokens: `3233`
+
+Interpretation: the request was slow because Opus xhigh spent most output tokens in hidden thinking, not because the proxy dropped the stream or prompt caching failed.
+
+When a Claude request is currently held, inspect the staged request-log parts before a final `v1-chat-completions-*.log` exists:
+
+```sh
+ls -lt /Users/indradeep/workspace/ai-infra/config/cliproxyapi/logs | head
+```
+
+```sh
+tail -n 80 /Users/indradeep/workspace/ai-infra/config/cliproxyapi/logs/request-log-parts-api-response-*/part-*.tmp
+```
+
+Useful scalar checks once a full request log exists:
+
+```sh
+grep -o '"max_tokens":[0-9]*\|"cache_read_input_tokens":[0-9]*\|"output_tokens":[0-9]*\|"thinking_tokens":[0-9]*\|"finish_reason":"[^"]*"' \
+  /Users/indradeep/workspace/ai-infra/config/cliproxyapi/logs/v1-chat-completions-*.log
+```
+
+If a Cursor-provided request UUID does not appear in the logs, correlate by timestamp, model, client IP, upstream `X-Client-Request-Id`, and the CLIProxyAPI short request ID from `main.log`.
+
 ## Cloudflare Tunnel
 
 The public hostname `clip2.indradeep.com` is expected to reach the local service through Cloudflare tunnel configuration in:

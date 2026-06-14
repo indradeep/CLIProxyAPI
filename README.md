@@ -75,6 +75,26 @@ VisionCoder is also offering our users a limited-time <a href="https://coder.vis
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
+## Local Runtime Debugging
+
+Local ai-infra deployment quick reference:
+
+| Item | Path or value |
+| --- | --- |
+| Binary output | `/Users/indradeep/workspace/ai-infra/src/CLIProxyAPI/bin/cliproxyapi` |
+| Build command | `go build -o bin/cliproxyapi ./cmd/server` |
+| launchd label | `com.ai-infra.cliproxyapi-8318` |
+| launchd plist | `/Users/indradeep/workspace/ai-infra/src/launchd/com.ai-infra.cliproxyapi-8318.plist` |
+| Config file | `/Users/indradeep/workspace/ai-infra/config/cliproxyapi/config.yaml` |
+| Config/auth directory | `/Users/indradeep/workspace/ai-infra/config/cliproxyapi` |
+| Main log | `/Users/indradeep/workspace/ai-infra/config/cliproxyapi/logs/main.log` |
+| Request logs | `/Users/indradeep/workspace/ai-infra/config/cliproxyapi/logs/v1-chat-completions-*.log` |
+| stdout/stderr | `/Users/indradeep/workspace/ai-infra/config/cliproxyapi/dev-server.stdout.log`, `/Users/indradeep/workspace/ai-infra/config/cliproxyapi/dev-server.stderr.log` |
+| Local endpoint | `http://127.0.0.1:8318` |
+| Public endpoint | `https://clip2.indradeep.com` |
+
+See [LOCAL_RUNTIME_DEBUGGING.md](LOCAL_RUNTIME_DEBUGGING.md) for launch/restart commands, endpoint probes, and Cursor request triage.
+
 ## Management API
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)

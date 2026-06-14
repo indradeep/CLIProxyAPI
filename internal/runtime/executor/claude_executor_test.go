@@ -936,6 +936,155 @@ func TestClaudeExecutor_GeneratesNewUserIDByDefault(t *testing.T) {
 	}
 }
 
+func writeClaudeOKStream(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	body := strings.Join([]string{
+		`event: message_start`,
+		`data: {"type":"message_start","message":{"id":"msg_123","model":"claude-opus-4-8","usage":{"input_tokens":1,"output_tokens":0}}}`,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`,
+		`event: message_delta`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":1,"output_tokens":1}}`,
+		`event: message_stop`,
+		`data: {"type":"message_stop"}`,
+		``,
+	}, "\n")
+	_, _ = w.Write([]byte(body))
+}
+
+func TestClaudeExecutor_OpenAIClaudeMetadataSessionIDBecomesClaudeHeader(t *testing.T) {
+	const sessionID = "22222222-2222-4222-8222-222222222222"
+	userID := "user_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef_account_11111111-1111-4111-8111-111111111111_session_" + sessionID
+
+	var gotSessionHeader string
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotSessionHeader = r.Header.Get("X-Claude-Code-Session-Id")
+		gotBody, _ = io.ReadAll(r.Body)
+		writeClaudeOKStream(w)
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-session-from-metadata",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{
+		"model": "clip-claude-opus-4-8-xhigh",
+		"metadata": {"user_id": "` + userID + `"},
+		"messages": [{"role": "user", "content": "hi"}]
+	}`)
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-opus-4-8",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	if gotSessionHeader != sessionID {
+		t.Fatalf("X-Claude-Code-Session-Id = %q, want %q; body=%s", gotSessionHeader, sessionID, string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "metadata.user_id").String(); got != userID {
+		t.Fatalf("metadata.user_id = %q, want %q; body=%s", got, userID, string(gotBody))
+	}
+}
+
+func TestClaudeExecutor_IncomingClaudeSessionHeaderWinsOverMetadata(t *testing.T) {
+	const metadataSessionID = "22222222-2222-4222-8222-222222222222"
+	const incomingSessionID = "33333333-3333-4333-8333-333333333333"
+	userID := "user_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef_account_11111111-1111-4111-8111-111111111111_session_" + metadataSessionID
+
+	var gotSessionHeader string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotSessionHeader = r.Header.Get("X-Claude-Code-Session-Id")
+		writeClaudeOKStream(w)
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-session-incoming-wins",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{
+		"model": "clip-claude-opus-4-8-xhigh",
+		"metadata": {"user_id": "` + userID + `"},
+		"messages": [{"role": "user", "content": "hi"}]
+	}`)
+
+	ctx := contextWithGinHeaders(map[string]string{"X-Claude-Code-Session-Id": incomingSessionID})
+	_, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "claude-opus-4-8",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	if gotSessionHeader != incomingSessionID {
+		t.Fatalf("X-Claude-Code-Session-Id = %q, want incoming %q", gotSessionHeader, incomingSessionID)
+	}
+}
+
+func TestClaudeExecutor_OpenAIClaudeEnvelopePreservedBeforePayloadOverride(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		writeClaudeOKStream(w)
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{
+		Payload: config.PayloadConfig{
+			Override: []config.PayloadRule{
+				{
+					Models: []config.PayloadModelRule{
+						{Name: "claude-opus-4-8", Protocol: "claude", FromProtocol: "openai"},
+					},
+					Params: map[string]any{
+						"thinking.type":        "adaptive",
+						"output_config.effort": "xhigh",
+					},
+				},
+			},
+		},
+	})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-thinking-override",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{
+		"model": "clip-claude-opus-4-8-xhigh",
+		"thinking": {"type": "adaptive"},
+		"output_config": {"effort": "low"},
+		"messages": [{"role": "user", "content": "hi"}]
+	}`)
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-opus-4-8",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	if got := gjson.GetBytes(gotBody, "thinking.type").String(); got != "adaptive" {
+		t.Fatalf("thinking.type = %q, want adaptive; body=%s", got, string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "output_config.effort").String(); got != "xhigh" {
+		t.Fatalf("output_config.effort = %q, want xhigh; body=%s", got, string(gotBody))
+	}
+}
+
 func TestClaudeExecutor_ExecuteOpenAINonStreamRejectsEmptyClaudeStream(t *testing.T) {
 	_, err := executeOpenAIChatCompletionThroughClaude(t, "")
 	if err == nil {

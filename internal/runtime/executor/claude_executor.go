@@ -244,6 +244,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if err != nil {
 		return resp, err
 	}
+	applyClaudeSessionHeaderFromPayload(httpReq, bodyForUpstream)
 	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg); errHeaders != nil {
 		return resp, errHeaders
 	}
@@ -427,6 +428,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return nil, err
 	}
+	applyClaudeSessionHeaderFromPayload(httpReq, bodyForUpstream)
 	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg); errHeaders != nil {
 		return nil, errHeaders
 	}
@@ -667,6 +669,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
+	applyClaudeSessionHeaderFromPayload(httpReq, body)
 	if errHeaders := applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg); errHeaders != nil {
 		return cliproxyexecutor.Response{}, errHeaders
 	}
@@ -1090,6 +1093,40 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		r.Header.Set("Accept-Encoding", "identity")
 	}
 	return nil
+}
+
+func applyClaudeSessionHeaderFromPayload(r *http.Request, payload []byte) {
+	if r == nil {
+		return
+	}
+	if ginCtx, ok := r.Context().Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+		if strings.TrimSpace(ginCtx.Request.Header.Get("X-Claude-Code-Session-Id")) != "" {
+			return
+		}
+	}
+	if sessionID := extractClaudeCodeSessionIDFromPayload(payload); sessionID != "" {
+		r.Header.Set("X-Claude-Code-Session-Id", sessionID)
+	}
+}
+
+func extractClaudeCodeSessionIDFromPayload(payload []byte) string {
+	userID := strings.TrimSpace(gjson.GetBytes(payload, "metadata.user_id").String())
+	if userID == "" || !helps.IsValidUserID(userID) {
+		return ""
+	}
+	const marker = "_session_"
+	idx := strings.LastIndex(userID, marker)
+	if idx < 0 {
+		return ""
+	}
+	sessionID := strings.TrimSpace(userID[idx+len(marker):])
+	if sessionID == "" {
+		return ""
+	}
+	if _, err := uuid.Parse(sessionID); err != nil {
+		return ""
+	}
+	return sessionID
 }
 
 func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {

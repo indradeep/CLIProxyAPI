@@ -243,3 +243,339 @@ func TestConvertOpenAIRequestToClaude_SystemOnlyInputKeepsFallbackUserMessage(t 
 		t.Fatalf("Expected fallback text %q, got %q", "", got)
 	}
 }
+
+func TestConvertOpenAIRequestToClaude_CursorClaudeNativeToolsAndAutoChoiceSurvive(t *testing.T) {
+	inputJSON := `{
+		"model": "clip-claude-opus-4-8-xhigh",
+		"tool_choice": {"type": "auto"},
+		"tools": [
+			{
+				"name": "Shell",
+				"description": "Run a shell command",
+				"input_schema": {
+					"type": "object",
+					"properties": {
+						"command": {"type": "string"}
+					},
+					"required": ["command"]
+				},
+				"cache_control": {"type": "ephemeral"}
+			}
+		],
+		"messages": [
+			{"role": "user", "content": "List files"}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-opus-4-8", []byte(inputJSON), true)
+	resultJSON := gjson.ParseBytes(result)
+
+	if got := resultJSON.Get("tools.0.name").String(); got != "Shell" {
+		t.Fatalf("tools.0.name = %q, want Shell; payload=%s", got, string(result))
+	}
+	if got := resultJSON.Get("tools.0.description").String(); got != "Run a shell command" {
+		t.Fatalf("tools.0.description = %q, want Run a shell command; payload=%s", got, string(result))
+	}
+	if got := resultJSON.Get("tools.0.input_schema.properties.command.type").String(); got != "string" {
+		t.Fatalf("tools.0.input_schema.properties.command.type = %q, want string; payload=%s", got, string(result))
+	}
+	if got := resultJSON.Get("tools.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("tools.0.cache_control.type = %q, want ephemeral; payload=%s", got, string(result))
+	}
+	if got := resultJSON.Get("tool_choice.type").String(); got != "auto" {
+		t.Fatalf("tool_choice.type = %q, want auto; payload=%s", got, string(result))
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_ClaudeNativeForcedToolChoiceSurvives(t *testing.T) {
+	inputJSON := `{
+		"model": "clip-claude-opus-4-8-xhigh",
+		"tool_choice": {"type": "tool", "name": "Shell"},
+		"tools": [
+			{
+				"name": "Shell",
+				"description": "Run a shell command",
+				"input_schema": {"type": "object", "properties": {"command": {"type": "string"}}}
+			}
+		],
+		"messages": [
+			{"role": "user", "content": "List files"}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-opus-4-8", []byte(inputJSON), true)
+	resultJSON := gjson.ParseBytes(result)
+
+	if got := resultJSON.Get("tool_choice.type").String(); got != "tool" {
+		t.Fatalf("tool_choice.type = %q, want tool; payload=%s", got, string(result))
+	}
+	if got := resultJSON.Get("tool_choice.name").String(); got != "Shell" {
+		t.Fatalf("tool_choice.name = %q, want Shell; payload=%s", got, string(result))
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_OpenAIChatFunctionToolStillMaps(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-4.1",
+		"tools": [
+			{
+				"type": "function",
+				"function": {
+					"name": "Shell",
+					"description": "Run a shell command",
+					"parameters": {
+						"type": "object",
+						"properties": {
+							"command": {"type": "string"}
+						},
+						"required": ["command"]
+					}
+				}
+			}
+		],
+		"messages": [
+			{"role": "user", "content": "List files"}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-opus-4-8", []byte(inputJSON), true)
+	resultJSON := gjson.ParseBytes(result)
+
+	if got := resultJSON.Get("tools.0.name").String(); got != "Shell" {
+		t.Fatalf("tools.0.name = %q, want Shell; payload=%s", got, string(result))
+	}
+	if got := resultJSON.Get("tools.0.input_schema.properties.command.type").String(); got != "string" {
+		t.Fatalf("tools.0.input_schema.properties.command.type = %q, want string; payload=%s", got, string(result))
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_OpenAIResponsesFunctionToolMapsOnClaudeRoute(t *testing.T) {
+	inputJSON := `{
+		"model": "clip-claude-opus-4-8-xhigh",
+		"tools": [
+			{
+				"type": "function",
+				"name": "Shell",
+				"description": "Run a shell command",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"command": {"type": "string"}
+					},
+					"required": ["command"]
+				}
+			}
+		],
+		"messages": [
+			{"role": "user", "content": "List files"}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-opus-4-8", []byte(inputJSON), true)
+	resultJSON := gjson.ParseBytes(result)
+
+	if got := resultJSON.Get("tools.0.name").String(); got != "Shell" {
+		t.Fatalf("tools.0.name = %q, want Shell; payload=%s", got, string(result))
+	}
+	if got := resultJSON.Get("tools.0.description").String(); got != "Run a shell command" {
+		t.Fatalf("tools.0.description = %q, want Run a shell command; payload=%s", got, string(result))
+	}
+	if got := resultJSON.Get("tools.0.input_schema.required.0").String(); got != "command" {
+		t.Fatalf("tools.0.input_schema.required.0 = %q, want command; payload=%s", got, string(result))
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_AnthropicTypedToolSurvives(t *testing.T) {
+	inputJSON := `{
+		"model": "clip-claude-opus-4-8-xhigh",
+		"tools": [
+			{
+				"type": "web_search_20250305",
+				"name": "web_search",
+				"cache_control": {"type": "ephemeral"}
+			}
+		],
+		"messages": [
+			{"role": "user", "content": "Search"}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-opus-4-8", []byte(inputJSON), true)
+	resultJSON := gjson.ParseBytes(result)
+
+	if got := resultJSON.Get("tools.0.type").String(); got != "web_search_20250305" {
+		t.Fatalf("tools.0.type = %q, want web_search_20250305; payload=%s", got, string(result))
+	}
+	if got := resultJSON.Get("tools.0.name").String(); got != "web_search" {
+		t.Fatalf("tools.0.name = %q, want web_search; payload=%s", got, string(result))
+	}
+	if got := resultJSON.Get("tools.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("tools.0.cache_control.type = %q, want ephemeral; payload=%s", got, string(result))
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_MalformedUnknownToolsAreDropped(t *testing.T) {
+	inputJSON := `{
+		"model": "clip-claude-opus-4-8-xhigh",
+		"tools": [
+			{"foo": "bar"},
+			{"name": "NoSchema", "description": "missing schema"}
+		],
+		"messages": [
+			{"role": "user", "content": "List files"}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-opus-4-8", []byte(inputJSON), true)
+	resultJSON := gjson.ParseBytes(result)
+
+	if tools := resultJSON.Get("tools"); tools.Exists() {
+		t.Fatalf("tools should be absent for malformed unknown tools; tools=%s payload=%s", tools.Raw, string(result))
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_PreservesCursorClaudeNativeBlocksAndEnvelope(t *testing.T) {
+	userID := "user_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef_account_11111111-1111-4111-8111-111111111111_session_22222222-2222-4222-8222-222222222222"
+	inputJSON := `{
+		"model": "clip-claude-opus-4-8-xhigh",
+		"system": [
+			{"type": "text", "text": "Cursor system", "cache_control": {"type": "ephemeral"}}
+		],
+		"metadata": {
+			"user_id": "` + userID + `"
+		},
+		"thinking": {"type": "adaptive"},
+		"output_config": {"effort": "high"},
+		"betas": ["prompt-caching-scope-2026-01-05"],
+		"tool_choice": {"type": "auto"},
+		"tools": [
+			{
+				"name": "Read",
+				"description": "Read a file",
+				"input_schema": {
+					"type": "object",
+					"properties": {"file_path": {"type": "string"}},
+					"required": ["file_path"]
+				}
+			}
+		],
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "text", "text": "I will inspect it.", "cache_control": {"type": "ephemeral"}},
+					{"type": "tool_use", "id": "toolu_cursor_1", "name": "Read", "input": {"file_path": "main.go"}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "tool_result",
+						"tool_use_id": "toolu_cursor_1",
+						"content": [{"type": "text", "text": "package main"}],
+						"is_error": false,
+						"cache_control": {"type": "ephemeral"}
+					}
+				]
+			}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-opus-4-8", []byte(inputJSON), true)
+	resultJSON := gjson.ParseBytes(result)
+
+	if got := resultJSON.Get("metadata.user_id").String(); got != userID {
+		t.Fatalf("metadata.user_id = %q, want %q; payload=%s", got, userID, string(result))
+	}
+	if got := resultJSON.Get("thinking.type").String(); got != "adaptive" {
+		t.Fatalf("thinking.type = %q, want adaptive; payload=%s", got, string(result))
+	}
+	if got := resultJSON.Get("output_config.effort").String(); got != "high" {
+		t.Fatalf("output_config.effort = %q, want high; payload=%s", got, string(result))
+	}
+	if got := resultJSON.Get("betas.0").String(); got != "prompt-caching-scope-2026-01-05" {
+		t.Fatalf("betas.0 = %q, want prompt-caching-scope-2026-01-05; payload=%s", got, string(result))
+	}
+	if got := resultJSON.Get("system.0.text").String(); got != "Cursor system" {
+		t.Fatalf("system.0.text = %q, want Cursor system; payload=%s", got, string(result))
+	}
+	if got := resultJSON.Get("system.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("system.0.cache_control.type = %q, want ephemeral; payload=%s", got, string(result))
+	}
+	if got := resultJSON.Get("tools.0.name").String(); got != "Read" {
+		t.Fatalf("tools.0.name = %q, want Read; payload=%s", got, string(result))
+	}
+	if got := resultJSON.Get("tools.0.input_schema.properties.file_path.type").String(); got != "string" {
+		t.Fatalf("tools.0.input_schema.properties.file_path.type = %q, want string; payload=%s", got, string(result))
+	}
+	if got := resultJSON.Get("tool_choice.type").String(); got != "auto" {
+		t.Fatalf("tool_choice.type = %q, want auto; payload=%s", got, string(result))
+	}
+
+	assistantContent := resultJSON.Get("messages.0.content")
+	if got := len(assistantContent.Array()); got != 2 {
+		t.Fatalf("assistant content length = %d, want 2; content=%s", got, assistantContent.Raw)
+	}
+	if got := assistantContent.Get("0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("assistant text cache_control = %q, want ephemeral; content=%s", got, assistantContent.Raw)
+	}
+	if got := assistantContent.Get("1.type").String(); got != "tool_use" {
+		t.Fatalf("assistant content[1].type = %q, want tool_use; content=%s", got, assistantContent.Raw)
+	}
+	if got := assistantContent.Get("1.id").String(); got != "toolu_cursor_1" {
+		t.Fatalf("tool_use id = %q, want toolu_cursor_1; content=%s", got, assistantContent.Raw)
+	}
+	if got := assistantContent.Get("1.name").String(); got != "Read" {
+		t.Fatalf("tool_use name = %q, want Read; content=%s", got, assistantContent.Raw)
+	}
+	if got := assistantContent.Get("1.input.file_path").String(); got != "main.go" {
+		t.Fatalf("tool_use input.file_path = %q, want main.go; content=%s", got, assistantContent.Raw)
+	}
+
+	userContent := resultJSON.Get("messages.1.content")
+	if got := len(userContent.Array()); got != 1 {
+		t.Fatalf("user content length = %d, want 1; content=%s", got, userContent.Raw)
+	}
+	if got := userContent.Get("0.type").String(); got != "tool_result" {
+		t.Fatalf("user content[0].type = %q, want tool_result; content=%s", got, userContent.Raw)
+	}
+	if got := userContent.Get("0.tool_use_id").String(); got != "toolu_cursor_1" {
+		t.Fatalf("tool_result tool_use_id = %q, want toolu_cursor_1; content=%s", got, userContent.Raw)
+	}
+	if got := userContent.Get("0.content.0.text").String(); got != "package main" {
+		t.Fatalf("tool_result text = %q, want package main; content=%s", got, userContent.Raw)
+	}
+	if got := userContent.Get("0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("tool_result cache_control = %q, want ephemeral; content=%s", got, userContent.Raw)
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_UnsupportedNativeContentBlocksStillIgnored(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-4.1",
+		"messages": [
+			{
+				"role": "user",
+				"content": [
+					{"type": "unsupported_native_block", "value": "drop me"},
+					{"type": "text", "text": "keep me"}
+				]
+			}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	content := resultJSON.Get("messages.0.content")
+
+	if got := len(content.Array()); got != 1 {
+		t.Fatalf("content length = %d, want 1; content=%s", got, content.Raw)
+	}
+	if got := content.Get("0.type").String(); got != "text" {
+		t.Fatalf("content[0].type = %q, want text; content=%s", got, content.Raw)
+	}
+	if got := content.Get("0.text").String(); got != "keep me" {
+		t.Fatalf("content[0].text = %q, want keep me; content=%s", got, content.Raw)
+	}
+}

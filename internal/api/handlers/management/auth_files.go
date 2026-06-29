@@ -12,6 +12,7 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -229,6 +230,23 @@ func (h *Handler) managementCallbackURL(path string) (string, error) {
 	}
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
+	}
+	if rawBase := strings.TrimSpace(h.cfg.RemoteManagement.PublicCallbackBaseURL); rawBase != "" {
+		baseURL, errParse := url.Parse(rawBase)
+		if errParse != nil {
+			return "", fmt.Errorf("invalid public callback base URL: %w", errParse)
+		}
+		if baseURL.Scheme != "http" && baseURL.Scheme != "https" {
+			return "", fmt.Errorf("invalid public callback base URL: scheme must be http or https")
+		}
+		if strings.TrimSpace(baseURL.Host) == "" {
+			return "", fmt.Errorf("invalid public callback base URL: host is required")
+		}
+		baseURL.Path = strings.TrimRight(baseURL.Path, "/") + path
+		baseURL.RawPath = ""
+		baseURL.RawQuery = ""
+		baseURL.Fragment = ""
+		return baseURL.String(), nil
 	}
 	scheme := "http"
 	if h.cfg.TLS.Enable {

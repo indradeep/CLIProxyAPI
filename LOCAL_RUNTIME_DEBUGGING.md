@@ -1,6 +1,6 @@
 # CLIProxyAPI Local Runtime Debugging
 
-Last verified: 2026-06-14.
+Last verified: 2026-06-15.
 
 This runbook documents the local ai-infra macOS deployment for this checkout. It is intentionally host-specific. Do not paste API keys, OAuth tokens, auth JSON contents, or bearer headers into issues or docs.
 
@@ -22,7 +22,7 @@ This runbook documents the local ai-infra macOS deployment for this checkout. It
 | launchd source plist | `/Users/indradeep/workspace/ai-infra/src/launchd/com.ai-infra.cliproxyapi-8318.plist` |
 | launchd label | `com.ai-infra.cliproxyapi-8318` |
 | Local endpoint | `http://127.0.0.1:8318` |
-| Public endpoint | `https://clip2.indradeep.com` |
+| Public endpoint | `https://clip.indradeep.com` |
 
 ## Launch Flow
 
@@ -76,6 +76,7 @@ Current local config characteristics:
 - Request logging: enabled
 - WebSocket auth: enabled
 - Remote management: local-only, control panel disabled
+- OAuth callback base URL: `https://clip.indradeep.com`
 
 Sensitive files in the config directory include:
 
@@ -172,7 +173,7 @@ curl -sS http://127.0.0.1:8318/v1/chat/completions \
 Public endpoint probe, assuming the Cloudflare tunnel is active:
 
 ```sh
-curl -sS https://clip2.indradeep.com/v1/models \
+curl -sS https://clip.indradeep.com/v1/models \
   -H "Authorization: Bearer ${CLIPROXY_KEY}" \
   | jq -r '.data[]?.id' \
   | sort
@@ -258,13 +259,13 @@ If a Cursor-provided request UUID does not appear in the logs, correlate by time
 
 ## Cloudflare Tunnel
 
-The public hostname `clip2.indradeep.com` is expected to reach the local service through Cloudflare tunnel configuration in:
+The public hostname `clip.indradeep.com` is expected to reach the local service through Cloudflare tunnel configuration in:
 
 ```text
 /Users/indradeep/workspace/ai-infra/config/cliproxyapi/cloudflared-config.yml
 ```
 
-The Cloudflare launch agent is separate from the CLIProxyAPI launch agent. If `127.0.0.1:8318` works but `https://clip2.indradeep.com` fails, debug the tunnel separately before changing CLIProxyAPI.
+The Cloudflare launch agent is separate from the CLIProxyAPI launch agent. If `127.0.0.1:8318` works but `https://clip.indradeep.com` fails, debug the tunnel separately before changing CLIProxyAPI.
 
 ## Common Failure Modes
 

@@ -96,7 +96,7 @@ Local ai-infra deployment quick reference:
 | Request logs | `/Users/indradeep/workspace/ai-infra/config/cliproxyapi/logs/v1-chat-completions-*.log` |
 | stdout/stderr | `/Users/indradeep/workspace/ai-infra/config/cliproxyapi/dev-server.stdout.log`, `/Users/indradeep/workspace/ai-infra/config/cliproxyapi/dev-server.stderr.log` |
 | Local endpoint | `http://127.0.0.1:8318` |
-| Public endpoint | `https://clip2.indradeep.com` |
+| Public endpoint | `https://clip.indradeep.com` |
 
 See [LOCAL_RUNTIME_DEBUGGING.md](LOCAL_RUNTIME_DEBUGGING.md) for launch/restart commands, endpoint probes, and Cursor request triage.
 

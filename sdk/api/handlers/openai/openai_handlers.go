@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
@@ -469,13 +470,49 @@ func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byt
 
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, h.GetAlt(c))
 
 	setSSEHeaders := func() {
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-cache")
 		c.Header("Connection", "keep-alive")
 		c.Header("Access-Control-Allow-Origin", "*")
+	}
+	type streamExecution struct {
+		data    <-chan []byte
+		headers http.Header
+		errs    <-chan *interfaces.ErrorMessage
+	}
+	alt := h.GetAlt(c)
+	executionChan := make(chan streamExecution, 1)
+	go func() {
+		data, headers, errs := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, alt)
+		executionChan <- streamExecution{data: data, headers: headers, errs: errs}
+	}()
+
+	var dataChan <-chan []byte
+	var errChan <-chan *interfaces.ErrorMessage
+	var upstreamHeaders http.Header
+
+	var keepAlive *time.Ticker
+	var keepAliveChan <-chan time.Time
+	if interval := handlers.StreamingKeepAliveInterval(h.Cfg); interval > 0 {
+		keepAlive = time.NewTicker(interval)
+		keepAliveChan = keepAlive.C
+		defer keepAlive.Stop()
+	}
+	headersCommitted := false
+	writeTerminalError := func(errMsg *interfaces.ErrorMessage) {
+		status := http.StatusInternalServerError
+		if errMsg != nil && errMsg.StatusCode > 0 {
+			status = errMsg.StatusCode
+		}
+		errText := http.StatusText(status)
+		if errMsg != nil && errMsg.Error != nil && errMsg.Error.Error() != "" {
+			errText = errMsg.Error.Error()
+		}
+		body := handlers.BuildErrorResponseBody(status, errText)
+		_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(body))
+		flusher.Flush()
 	}
 
 	// Peek at the first chunk to determine success or failure before setting headers
@@ -484,6 +521,18 @@ func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byt
 		case <-c.Request.Context().Done():
 			cliCancel(c.Request.Context().Err())
 			return
+		case execution := <-executionChan:
+			dataChan = execution.data
+			upstreamHeaders = execution.headers
+			errChan = execution.errs
+			executionChan = nil
+		case <-keepAliveChan:
+			if !headersCommitted {
+				setSSEHeaders()
+				headersCommitted = true
+			}
+			_, _ = fmt.Fprint(c.Writer, ": keep-alive\n\n")
+			flusher.Flush()
 		case errMsg, ok := <-errChan:
 			if !ok {
 				// Err channel closed cleanly; wait for data channel.
@@ -491,7 +540,11 @@ func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byt
 				continue
 			}
 			// Upstream failed immediately. Return proper error status and JSON.
-			h.WriteErrorResponse(c, errMsg)
+			if headersCommitted {
+				writeTerminalError(errMsg)
+			} else {
+				h.WriteErrorResponse(c, errMsg)
+			}
 			if errMsg != nil {
 				cliCancel(errMsg.Error)
 			} else {
@@ -501,8 +554,11 @@ func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byt
 		case chunk, ok := <-dataChan:
 			if !ok {
 				// Stream closed without data? Send DONE or just headers.
-				setSSEHeaders()
-				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+				if !headersCommitted {
+					setSSEHeaders()
+					handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+					headersCommitted = true
+				}
 				_, _ = fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
 				flusher.Flush()
 				cliCancel(nil)
@@ -510,8 +566,11 @@ func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byt
 			}
 
 			// Success! Commit to streaming headers.
-			setSSEHeaders()
-			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+			if !headersCommitted {
+				setSSEHeaders()
+				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+				headersCommitted = true
+			}
 
 			_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(chunk))
 			flusher.Flush()

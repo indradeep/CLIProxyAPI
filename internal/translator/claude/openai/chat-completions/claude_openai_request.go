@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -31,7 +32,7 @@ var (
 // It extracts the model name, system instruction, message contents, and tool declarations
 // from the raw JSON request and returns them in the format expected by the Claude Code API.
 // The function performs comprehensive transformation including:
-// 1. Model name mapping and parameter extraction (max_tokens, temperature, top_p, etc.)
+// 1. Model name mapping and parameter extraction (max_tokens, top_p, etc.)
 // 2. Message content conversion from OpenAI to Claude Code format
 // 3. Tool call and tool result handling with proper ID mapping
 // 4. Image data conversion from OpenAI data URLs to Claude Code base64 format
@@ -137,11 +138,8 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 		out, _ = sjson.SetBytes(out, "max_tokens", maxTokens.Int())
 	}
 
-	// Temperature setting for controlling response randomness
-	if temp := root.Get("temperature"); temp.Exists() {
-		out, _ = sjson.SetBytes(out, "temperature", temp.Float())
-	} else if topP := root.Get("top_p"); topP.Exists() {
-		// Top P setting for nucleus sampling (filtered out if temperature is set)
+	// Top P setting for nucleus sampling.
+	if topP := root.Get("top_p"); topP.Exists() {
 		out, _ = sjson.SetBytes(out, "top_p", topP.Float())
 	}
 
@@ -173,19 +171,35 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 
 			switch role {
 			case "system":
+				systemStart := len(gjson.GetBytes(out, "system").Array())
 				if contentResult.Exists() && contentResult.Type == gjson.String && contentResult.String() != "" {
 					textPart := []byte(`{"type":"text","text":""}`)
 					textPart, _ = sjson.SetBytes(textPart, "text", contentResult.String())
+					textPart = common.AttachCacheControl(textPart, message)
 					out, _ = sjson.SetRawBytes(out, "system.-1", textPart)
 				} else if contentResult.Exists() && contentResult.IsArray() {
 					contentResult.ForEach(func(_, part gjson.Result) bool {
 						if part.Get("type").String() == "text" {
-							if textPart := convertClaudeTextPart(part); textPart != "" {
-								out, _ = sjson.SetRawBytes(out, "system.-1", []byte(textPart))
-							}
+							textPart := []byte(`{"type":"text","text":""}`)
+							textPart, _ = sjson.SetBytes(textPart, "text", part.Get("text").String())
+							textPart = common.AttachCacheControl(textPart, part)
+							out, _ = sjson.SetRawBytes(out, "system.-1", textPart)
 						}
 						return true
 					})
+					// Message-level cache_control applies to the last system block from this message.
+					if message.Get("cache_control").Exists() {
+						systemArr := gjson.GetBytes(out, "system").Array()
+						if len(systemArr) > systemStart {
+							lastIdx := len(systemArr) - 1
+							if !systemArr[lastIdx].Get("cache_control").Exists() {
+								path := fmt.Sprintf("system.%d", lastIdx)
+								block := []byte(systemArr[lastIdx].Raw)
+								block = common.AttachCacheControl(block, message)
+								out, _ = sjson.SetRawBytes(out, path, block)
+							}
+						}
+					}
 				}
 			case "user", "assistant":
 				msg := []byte(`{"role":"","content":[]}`)
@@ -244,6 +258,7 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 					})
 				}
 
+				msg = common.AttachMessageCacheControl(msg, message)
 				out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
 				messageIndex++
 
@@ -261,6 +276,7 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 				} else {
 					toolResultBlock, _ = sjson.SetBytes(toolResultBlock, "content", toolResultContent)
 				}
+				toolResultBlock = common.AttachCacheControl(toolResultBlock, message)
 
 				// Claude requires all tool_result blocks answering the preceding
 				// assistant tool_use turn to share one user message. Consecutive
@@ -354,7 +370,10 @@ func convertFunctionToolDefinitionToClaudeTool(tool gjson.Result) string {
 	anthropicTool, _ = sjson.SetBytes(anthropicTool, "name", name)
 	anthropicTool, _ = sjson.SetBytes(anthropicTool, "description", source.Get("description").String())
 	anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", []byte(schema.Raw))
-	anthropicTool = copyClaudeCacheControl(anthropicTool, tool)
+	anthropicTool = common.AttachCacheControl(anthropicTool, tool)
+	if !gjson.GetBytes(anthropicTool, "cache_control").Exists() {
+		anthropicTool = common.AttachCacheControl(anthropicTool, source)
+	}
 	return string(anthropicTool)
 }
 
@@ -368,7 +387,7 @@ func convertClaudeNativeCustomTool(tool gjson.Result, inputSchema gjson.Result) 
 	anthropicTool, _ = sjson.SetBytes(anthropicTool, "name", name)
 	anthropicTool, _ = sjson.SetBytes(anthropicTool, "description", tool.Get("description").String())
 	anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", []byte(inputSchema.Raw))
-	anthropicTool = copyClaudeCacheControl(anthropicTool, tool)
+	anthropicTool = common.AttachCacheControl(anthropicTool, tool)
 	return string(anthropicTool)
 }
 
@@ -465,12 +484,13 @@ func preserveClaudeNativeEnvelope(out []byte, root gjson.Result) []byte {
 }
 
 func convertOpenAIContentPartToClaudePart(part gjson.Result, role string) string {
+	var claudePart []byte
 	switch part.Get("type").String() {
 	case "text":
-		return convertClaudeTextPart(part)
+		claudePart = []byte(convertClaudeTextPart(part))
 
 	case "image_url":
-		return convertOpenAIImageURLToClaudePart(part.Get("image_url.url").String())
+		claudePart = []byte(convertOpenAIImageURLToClaudePart(part.Get("image_url.url").String()))
 
 	case "file":
 		fileData := part.Get("file.file_data").String()
@@ -483,7 +503,7 @@ func convertOpenAIContentPartToClaudePart(part gjson.Result, role string) string
 				docPart := []byte(`{"type":"document","source":{"type":"base64","media_type":"","data":""}}`)
 				docPart, _ = sjson.SetBytes(docPart, "source.media_type", mediaType)
 				docPart, _ = sjson.SetBytes(docPart, "source.data", data)
-				return string(docPart)
+				claudePart = docPart
 			}
 		}
 
@@ -506,13 +526,16 @@ func convertOpenAIContentPartToClaudePart(part gjson.Result, role string) string
 		}
 	}
 
-	return ""
+	if len(claudePart) == 0 {
+		return ""
+	}
+	return string(common.AttachCacheControl(claudePart, part))
 }
 
 func convertClaudeTextPart(part gjson.Result) string {
 	textPart := []byte(`{"type":"text","text":""}`)
 	textPart, _ = sjson.SetBytes(textPart, "text", part.Get("text").String())
-	textPart = copyClaudeCacheControl(textPart, part)
+	textPart = common.AttachCacheControl(textPart, part)
 	return string(textPart)
 }
 
@@ -529,7 +552,7 @@ func convertClaudeNativeToolUsePart(part gjson.Result) string {
 	if input := part.Get("input"); input.Exists() && input.IsObject() {
 		toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte(input.Raw))
 	}
-	toolUse = copyClaudeCacheControl(toolUse, part)
+	toolUse = common.AttachCacheControl(toolUse, part)
 	return string(toolUse)
 }
 
@@ -550,7 +573,7 @@ func convertClaudeNativeToolResultPart(part gjson.Result) string {
 	if isError := part.Get("is_error"); isError.Exists() && (isError.Type == gjson.True || isError.Type == gjson.False) {
 		toolResult, _ = sjson.SetBytes(toolResult, "is_error", isError.Bool())
 	}
-	toolResult = copyClaudeCacheControl(toolResult, part)
+	toolResult = common.AttachCacheControl(toolResult, part)
 	return string(toolResult)
 }
 
@@ -583,18 +606,6 @@ func lastToolResultTurnIndex(out []byte) int {
 		return -1
 	}
 	return len(arr) - 1
-}
-
-func copyClaudeCacheControl(dst []byte, src gjson.Result) []byte {
-	cacheControl := src.Get("cache_control")
-	if !cacheControl.Exists() || !cacheControl.IsObject() {
-		return dst
-	}
-	out, err := sjson.SetRawBytes(dst, "cache_control", []byte(cacheControl.Raw))
-	if err != nil {
-		return dst
-	}
-	return out
 }
 
 func convertOpenAIImageURLToClaudePart(imageURL string) string {

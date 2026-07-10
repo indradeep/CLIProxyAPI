@@ -68,6 +68,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 
 	// Build tool name shortening map from original tools (if any)
 	originalToolNameMap := map[string]string{}
+	customToolNames := map[string]struct{}{}
 	{
 		tools := gjson.GetBytes(rawJSON, "tools")
 		if tools.IsArray() && len(tools.Array()) > 0 {
@@ -76,12 +77,17 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 			arr := tools.Array()
 			for i := 0; i < len(arr); i++ {
 				t := arr[i]
-				if t.Get("type").String() == "function" {
+				switch t.Get("type").String() {
+				case "function":
 					fn := t.Get("function")
 					if fn.Exists() {
 						if v := fn.Get("name"); v.Exists() {
 							names = append(names, v.String())
 						}
+					}
+				case "custom":
+					if name := t.Get("name").String(); name != "" {
+						customToolNames[name] = struct{}{}
 					}
 				}
 			}
@@ -111,6 +117,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 
 	// Build input from messages, handling all message types including tool calls
 	out, _ = sjson.SetRawBytes(out, "input", []byte(`[]`))
+	customToolCallIDs := map[string]struct{}{}
 	if messages.IsArray() {
 		arr := messages.Array()
 		for i := 0; i < len(arr); i++ {
@@ -123,9 +130,13 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 				toolCallID := m.Get("tool_call_id").String()
 				content := m.Get("content")
 
-				// Create function_call_output object
+				outputType := "function_call_output"
+				if _, ok := customToolCallIDs[toolCallID]; ok {
+					outputType = "custom_tool_call_output"
+				}
+
 				funcOutput := []byte(`{}`)
-				funcOutput, _ = sjson.SetBytes(funcOutput, "type", "function_call_output")
+				funcOutput, _ = sjson.SetBytes(funcOutput, "type", outputType)
 				funcOutput, _ = sjson.SetBytes(funcOutput, "call_id", toolCallID)
 				funcOutput = setToolCallOutputContent(funcOutput, content)
 				out, _ = sjson.SetRawBytes(out, "input.-1", funcOutput)
@@ -226,12 +237,25 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 						for j := 0; j < len(toolCallsArr); j++ {
 							tc := toolCallsArr[j]
 							if tc.Get("type").String() == "function" {
+								callID := tc.Get("id").String()
+								name := tc.Get("function.name").String()
+								arguments := tc.Get("function.arguments").String()
+								if _, ok := customToolNames[name]; ok {
+									customCall := []byte(`{}`)
+									customCall, _ = sjson.SetBytes(customCall, "type", "custom_tool_call")
+									customCall, _ = sjson.SetBytes(customCall, "call_id", callID)
+									customCall, _ = sjson.SetBytes(customCall, "name", name)
+									customCall, _ = sjson.SetBytes(customCall, "input", arguments)
+									out, _ = sjson.SetRawBytes(out, "input.-1", customCall)
+									customToolCallIDs[callID] = struct{}{}
+									continue
+								}
+
 								// Create function_call as top-level object
 								funcCall := []byte(`{}`)
 								funcCall, _ = sjson.SetBytes(funcCall, "type", "function_call")
-								funcCall, _ = sjson.SetBytes(funcCall, "call_id", tc.Get("id").String())
+								funcCall, _ = sjson.SetBytes(funcCall, "call_id", callID)
 								{
-									name := tc.Get("function.name").String()
 									if short, ok := originalToolNameMap[name]; ok {
 										name = short
 									} else {
@@ -239,7 +263,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 									}
 									funcCall, _ = sjson.SetBytes(funcCall, "name", name)
 								}
-								funcCall, _ = sjson.SetBytes(funcCall, "arguments", tc.Get("function.arguments").String())
+								funcCall, _ = sjson.SetBytes(funcCall, "arguments", arguments)
 								out, _ = sjson.SetRawBytes(out, "input.-1", funcCall)
 							}
 						}

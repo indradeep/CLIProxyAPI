@@ -618,6 +618,93 @@ func TestMultiTurnToolCalling(t *testing.T) {
 	}
 }
 
+func TestCursorCustomToolRoundTripPreservesOrdinaryFunctions(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-5.5",
+		"messages": [
+			{"role": "user", "content": "Patch the file, then inspect it"},
+			{
+				"role": "assistant",
+				"content": null,
+				"tool_calls": [
+					{"id": "call_apply", "type": "function", "function": {"name": "ApplyPatch", "arguments": "*** Begin Patch\n*** End Patch"}}
+				]
+			},
+			{"role": "tool", "tool_call_id": "call_apply", "content": "Done!"},
+			{
+				"role": "assistant",
+				"content": null,
+				"tool_calls": [
+					{"id": "call_shell", "type": "function", "function": {"name": "Shell", "arguments": "{\"command\":\"pwd\"}"}}
+				]
+			},
+			{"role": "tool", "tool_call_id": "call_shell", "content": "/tmp/workspace"}
+		],
+		"tools": [
+			{"type": "custom", "name": "ApplyPatch", "description": "Apply a patch", "format": {"type": "grammar", "syntax": "lark", "definition": "start: /.+/s"}},
+			{"type": "function", "function": {"name": "Shell", "description": "Run a command", "parameters": {"type": "object", "properties": {"command": {"type": "string"}}}}}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-5.5", input, true)
+	items := gjson.GetBytes(out, "input").Array()
+	if len(items) != 5 {
+		t.Fatalf("expected user plus two call/output pairs, got %d: %s", len(items), gjson.GetBytes(out, "input").Raw)
+	}
+
+	if got := items[1].Get("type").String(); got != "custom_tool_call" {
+		t.Fatalf("expected ApplyPatch to become custom_tool_call, got %q: %s", got, items[1].Raw)
+	}
+	if got := items[1].Get("name").String(); got != "ApplyPatch" {
+		t.Errorf("expected custom tool name ApplyPatch, got %q", got)
+	}
+	if got := items[1].Get("input").String(); got != "*** Begin Patch\n*** End Patch" {
+		t.Errorf("expected raw patch input, got %q", got)
+	}
+	if got := items[2].Get("type").String(); got != "custom_tool_call_output" {
+		t.Fatalf("expected ApplyPatch result to become custom_tool_call_output, got %q: %s", got, items[2].Raw)
+	}
+	if got := items[2].Get("output").String(); got != "Done!" {
+		t.Errorf("expected custom tool output Done!, got %q", got)
+	}
+
+	if got := items[3].Get("type").String(); got != "function_call" {
+		t.Fatalf("expected Shell to remain function_call, got %q: %s", got, items[3].Raw)
+	}
+	if got := items[4].Get("type").String(); got != "function_call_output" {
+		t.Fatalf("expected Shell result to remain function_call_output, got %q: %s", got, items[4].Raw)
+	}
+	if items[1].Get("call_id").String() != items[2].Get("call_id").String() {
+		t.Errorf("custom call/output IDs do not match: call=%q output=%q", items[1].Get("call_id").String(), items[2].Get("call_id").String())
+	}
+	if items[3].Get("call_id").String() != items[4].Get("call_id").String() {
+		t.Errorf("function call/output IDs do not match: call=%q output=%q", items[3].Get("call_id").String(), items[4].Get("call_id").String())
+	}
+}
+
+func TestFunctionNamedApplyPatchRemainsFunctionWithoutCustomDeclaration(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-5.5",
+		"messages": [
+			{"role": "user", "content": "Patch"},
+			{"role": "assistant", "content": null, "tool_calls": [{"id": "call_apply", "type": "function", "function": {"name": "ApplyPatch", "arguments": "{}"}}]},
+			{"role": "tool", "tool_call_id": "call_apply", "content": "Done"}
+		],
+		"tools": [
+			{"type": "function", "function": {"name": "ApplyPatch", "description": "Ordinary function", "parameters": {"type": "object", "properties": {}}}}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("gpt-5.5", input, true)
+	items := gjson.GetBytes(out, "input").Array()
+	if got := items[1].Get("type").String(); got != "function_call" {
+		t.Fatalf("expected function declaration to remain function_call, got %q: %s", got, items[1].Raw)
+	}
+	if got := items[2].Get("type").String(); got != "function_call_output" {
+		t.Fatalf("expected function output to remain function_call_output, got %q: %s", got, items[2].Raw)
+	}
+}
+
 // Tool names over 64 chars get shortened, call_id stays the same.
 func TestToolNameShortening(t *testing.T) {
 	longName := "a_very_long_tool_name_that_exceeds_sixty_four_characters_limit_here_test"

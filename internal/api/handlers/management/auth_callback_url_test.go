@@ -24,7 +24,7 @@ func TestManagementCallbackURLUsesPublicCallbackBaseURL(t *testing.T) {
 	h := NewHandlerWithoutConfigFilePath(&config.Config{
 		Port: 8318,
 		RemoteManagement: config.RemoteManagement{
-			PublicCallbackBaseURL: "https://clip.indradeep.com/",
+			PublicCallbackBaseURL: "https://proxy.example.test/",
 		},
 	}, nil)
 
@@ -33,7 +33,7 @@ func TestManagementCallbackURLUsesPublicCallbackBaseURL(t *testing.T) {
 		t.Fatalf("managementCallbackURL() error = %v", err)
 	}
 
-	want := "https://clip.indradeep.com/anthropic/callback"
+	want := "https://proxy.example.test/anthropic/callback"
 	if got != want {
 		t.Fatalf("managementCallbackURL() = %q, want %q", got, want)
 	}
@@ -43,7 +43,7 @@ func TestManagementCallbackURLRejectsInvalidPublicCallbackBaseURL(t *testing.T) 
 	h := NewHandlerWithoutConfigFilePath(&config.Config{
 		Port: 8318,
 		RemoteManagement: config.RemoteManagement{
-			PublicCallbackBaseURL: "clip.indradeep.com",
+			PublicCallbackBaseURL: "proxy.example.test",
 		},
 	}, nil)
 

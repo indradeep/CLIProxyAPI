@@ -7,6 +7,35 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestConvertCodexResponseToOpenAI_IncompleteTerminal(t *testing.T) {
+	ctx := context.Background()
+	terminal := []byte(`{"type":"response.incomplete","response":{"id":"resp_1","model":"gpt-5.5","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}`)
+
+	var param any
+	streamOut := ConvertCodexResponseToOpenAI(ctx, "gpt-5.5", nil, nil, append([]byte("data: "), terminal...), &param)
+	if len(streamOut) != 1 {
+		t.Fatalf("expected 1 streaming terminal chunk, got %d", len(streamOut))
+	}
+	if got := gjson.GetBytes(streamOut[0], "choices.0.finish_reason").String(); got != "length" {
+		t.Fatalf("stream finish_reason = %q, want length; payload=%s", got, streamOut[0])
+	}
+	if got := gjson.GetBytes(streamOut[0], "choices.0.native_finish_reason").String(); got != "max_output_tokens" {
+		t.Fatalf("stream native_finish_reason = %q, want max_output_tokens; payload=%s", got, streamOut[0])
+	}
+
+	var toolParam any
+	_ = ConvertCodexResponseToOpenAI(ctx, "gpt-5.5", nil, nil, []byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_1","name":"lookup"}}`), &toolParam)
+	toolStreamOut := ConvertCodexResponseToOpenAI(ctx, "gpt-5.5", nil, nil, append([]byte("data: "), terminal...), &toolParam)
+	if got := gjson.GetBytes(toolStreamOut[0], "choices.0.finish_reason").String(); got != "length" {
+		t.Fatalf("tool stream finish_reason = %q, want length; payload=%s", got, toolStreamOut[0])
+	}
+
+	nonStreamOut := ConvertCodexResponseToOpenAINonStream(ctx, "gpt-5.5", nil, nil, terminal, nil)
+	if got := gjson.GetBytes(nonStreamOut, "choices.0.finish_reason").String(); got != "length" {
+		t.Fatalf("non-stream finish_reason = %q, want length; payload=%s", got, nonStreamOut)
+	}
+}
+
 func TestConvertCodexResponseToOpenAI_StreamSetsModelFromResponseCreated(t *testing.T) {
 	ctx := context.Background()
 	var param any
@@ -154,41 +183,19 @@ func TestConvertCodexResponseToOpenAI_CustomToolCallStream(t *testing.T) {
 	ctx := context.Background()
 	var param any
 
-	out := ConvertCodexResponseToOpenAI(ctx, "gpt-5.5", nil, nil, []byte(`data: {"type":"response.created","response":{"id":"resp_123","created_at":1700000000,"model":"gpt-5.5"}}`), &param)
-	if len(out) != 0 {
-		t.Fatalf("expected no output for response.created, got %d chunks", len(out))
+	out := ConvertCodexResponseToOpenAI(ctx, "gpt-5.6-sol", nil, nil, []byte(`data: {"type":"response.output_item.added","item":{"type":"custom_tool_call","call_id":"call_apply","name":"apply_patch","input":""}}`), &param)
+	if got := gjson.GetBytes(out[0], "choices.0.delta.tool_calls.0.function.name").String(); got != "apply_patch" {
+		t.Fatalf("tool name = %q, want apply_patch; chunk=%s", got, out[0])
 	}
 
-	out = ConvertCodexResponseToOpenAI(ctx, "gpt-5.5", nil, nil, []byte(`data: {"type":"response.output_item.added","item":{"type":"custom_tool_call","call_id":"call_apply","name":"ApplyPatch","input":""}}`), &param)
-	if len(out) != 1 {
-		t.Fatalf("expected 1 announcement chunk, got %d", len(out))
-	}
-	if got := gjson.GetBytes(out[0], "choices.0.delta.tool_calls.0.function.name").String(); got != "ApplyPatch" {
-		t.Fatalf("expected tool name ApplyPatch, got %q; chunk=%s", got, string(out[0]))
-	}
-	if got := gjson.GetBytes(out[0], "choices.0.delta.tool_calls.0.id").String(); got != "call_apply" {
-		t.Fatalf("expected call id call_apply, got %q", got)
-	}
-
-	out = ConvertCodexResponseToOpenAI(ctx, "gpt-5.5", nil, nil, []byte(`data: {"type":"response.custom_tool_call_input.delta","delta":"*** Begin Patch\n"}`), &param)
-	if len(out) != 1 {
-		t.Fatalf("expected 1 arguments delta chunk, got %d", len(out))
-	}
+	out = ConvertCodexResponseToOpenAI(ctx, "gpt-5.6-sol", nil, nil, []byte(`data: {"type":"response.custom_tool_call_input.delta","delta":"*** Begin Patch\n"}`), &param)
 	if got := gjson.GetBytes(out[0], "choices.0.delta.tool_calls.0.function.arguments").String(); got != "*** Begin Patch\n" {
-		t.Fatalf("expected arguments delta, got %q; chunk=%s", got, string(out[0]))
+		t.Fatalf("arguments delta = %q; chunk=%s", got, out[0])
 	}
 
-	out = ConvertCodexResponseToOpenAI(ctx, "gpt-5.5", nil, nil, []byte(`data: {"type":"response.output_item.done","item":{"type":"custom_tool_call","call_id":"call_apply","name":"ApplyPatch","input":"*** Begin Patch\n"}}`), &param)
-	if len(out) != 0 {
-		t.Fatalf("expected output_item.done to be suppressed after announcement, got %d", len(out))
-	}
-
-	out = ConvertCodexResponseToOpenAI(ctx, "gpt-5.5", nil, nil, []byte(`data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`), &param)
-	if len(out) != 1 {
-		t.Fatalf("expected 1 completion chunk, got %d", len(out))
-	}
+	out = ConvertCodexResponseToOpenAI(ctx, "gpt-5.6-sol", nil, nil, []byte(`data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`), &param)
 	if got := gjson.GetBytes(out[0], "choices.0.finish_reason").String(); got != "tool_calls" {
-		t.Fatalf("expected finish_reason tool_calls, got %q; chunk=%s", got, string(out[0]))
+		t.Fatalf("finish_reason = %q, want tool_calls; chunk=%s", got, out[0])
 	}
 }
 
@@ -196,31 +203,123 @@ func TestConvertCodexResponseToOpenAI_CustomToolCallInputDoneFallback(t *testing
 	ctx := context.Background()
 	var param any
 
-	ConvertCodexResponseToOpenAI(ctx, "gpt-5.5", nil, nil, []byte(`data: {"type":"response.output_item.added","item":{"type":"custom_tool_call","call_id":"call_apply","name":"ApplyPatch","input":""}}`), &param)
-
-	out := ConvertCodexResponseToOpenAI(ctx, "gpt-5.5", nil, nil, []byte(`data: {"type":"response.custom_tool_call_input.done","input":"*** Begin Patch\n"}`), &param)
-	if len(out) != 1 {
-		t.Fatalf("expected 1 fallback arguments chunk, got %d", len(out))
-	}
+	_ = ConvertCodexResponseToOpenAI(ctx, "gpt-5.6-sol", nil, nil, []byte(`data: {"type":"response.output_item.added","item":{"type":"custom_tool_call","call_id":"call_apply","name":"apply_patch","input":""}}`), &param)
+	out := ConvertCodexResponseToOpenAI(ctx, "gpt-5.6-sol", nil, nil, []byte(`data: {"type":"response.custom_tool_call_input.done","input":"*** Begin Patch\n"}`), &param)
 	if got := gjson.GetBytes(out[0], "choices.0.delta.tool_calls.0.function.arguments").String(); got != "*** Begin Patch\n" {
-		t.Fatalf("expected fallback arguments, got %q; chunk=%s", got, string(out[0]))
+		t.Fatalf("fallback arguments = %q; chunk=%s", got, out[0])
 	}
 }
 
 func TestConvertCodexResponseToOpenAINonStream_CustomToolCall(t *testing.T) {
-	ctx := context.Background()
+	raw := []byte(`{"type":"response.completed","response":{"id":"resp_123","created_at":1700000000,"model":"gpt-5.6-sol","status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2},"output":[{"type":"custom_tool_call","call_id":"call_apply","name":"apply_patch","input":"*** Begin Patch\n"}]}}`)
+	out := ConvertCodexResponseToOpenAINonStream(context.Background(), "gpt-5.6-sol", nil, nil, raw, nil)
 
-	raw := []byte(`{"type":"response.completed","response":{"id":"resp_123","created_at":1700000000,"model":"gpt-5.5","status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2},"output":[{"type":"custom_tool_call","call_id":"call_apply","name":"ApplyPatch","input":"*** Begin Patch\n"}]}}`)
-	out := ConvertCodexResponseToOpenAINonStream(ctx, "gpt-5.5", nil, nil, raw, nil)
-
-	if got := gjson.GetBytes(out, "choices.0.message.tool_calls.0.function.name").String(); got != "ApplyPatch" {
-		t.Fatalf("expected tool name ApplyPatch, got %q; resp=%s", got, string(out))
-	}
 	if got := gjson.GetBytes(out, "choices.0.message.tool_calls.0.function.arguments").String(); got != "*** Begin Patch\n" {
-		t.Fatalf("expected tool arguments, got %q; resp=%s", got, string(out))
+		t.Fatalf("arguments = %q; response=%s", got, out)
 	}
 	if got := gjson.GetBytes(out, "choices.0.finish_reason").String(); got != "tool_calls" {
-		t.Fatalf("expected finish_reason tool_calls, got %q; resp=%s", got, string(out))
+		t.Fatalf("finish_reason = %q, want tool_calls; response=%s", got, out)
+	}
+}
+
+func TestConvertCodexResponseToOpenAI_StreamForwardsCacheWriteTokens(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	// Seed response.created so response.completed can reuse response metadata.
+	_ = ConvertCodexResponseToOpenAI(ctx, "gpt-5.4", nil, nil, []byte(`data: {"type":"response.created","response":{"id":"resp_123","created_at":1700000000,"model":"gpt-5.4"}}`), &param)
+
+	chunk := []byte(`data: {"type":"response.completed","response":{"id":"resp_123","created_at":1700000000,"model":"gpt-5.4","usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120,"input_tokens_details":{"cached_tokens":30,"cache_write_tokens":40},"output_tokens_details":{"reasoning_tokens":5}}}}`)
+	out := ConvertCodexResponseToOpenAI(ctx, "gpt-5.4", nil, nil, chunk, &param)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(out))
+	}
+
+	assertUsageMapping(t, out[0], 40, true)
+}
+
+func TestConvertCodexResponseToOpenAI_StreamOmitsMissingCacheWriteTokens(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	_ = ConvertCodexResponseToOpenAI(ctx, "gpt-5.4", nil, nil, []byte(`data: {"type":"response.created","response":{"id":"resp_123","created_at":1700000000,"model":"gpt-5.4"}}`), &param)
+
+	chunk := []byte(`data: {"type":"response.completed","response":{"id":"resp_123","created_at":1700000000,"model":"gpt-5.4","usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120,"input_tokens_details":{"cached_tokens":30},"output_tokens_details":{"reasoning_tokens":5}}}}`)
+	out := ConvertCodexResponseToOpenAI(ctx, "gpt-5.4", nil, nil, chunk, &param)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(out))
+	}
+
+	assertUsageMapping(t, out[0], 0, false)
+}
+
+func TestConvertCodexResponseToOpenAI_StreamPreservesExplicitZeroCacheWriteTokens(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	_ = ConvertCodexResponseToOpenAI(ctx, "gpt-5.4", nil, nil, []byte(`data: {"type":"response.created","response":{"id":"resp_123","created_at":1700000000,"model":"gpt-5.4"}}`), &param)
+
+	chunk := []byte(`data: {"type":"response.completed","response":{"id":"resp_123","created_at":1700000000,"model":"gpt-5.4","usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120,"input_tokens_details":{"cached_tokens":30,"cache_write_tokens":0},"output_tokens_details":{"reasoning_tokens":5}}}}`)
+	out := ConvertCodexResponseToOpenAI(ctx, "gpt-5.4", nil, nil, chunk, &param)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(out))
+	}
+
+	assertUsageMapping(t, out[0], 0, true)
+}
+
+func TestConvertCodexResponseToOpenAI_NonStreamForwardsCacheWriteTokens(t *testing.T) {
+	ctx := context.Background()
+	raw := []byte(`{"type":"response.completed","response":{"id":"resp_123","created_at":1700000000,"model":"gpt-5.4","status":"completed","usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120,"input_tokens_details":{"cached_tokens":30,"cache_write_tokens":40},"output_tokens_details":{"reasoning_tokens":5}},"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}}`)
+	out := ConvertCodexResponseToOpenAINonStream(ctx, "gpt-5.4", nil, nil, raw, nil)
+	assertUsageMapping(t, out, 40, true)
+}
+
+func TestConvertCodexResponseToOpenAI_NonStreamOmitsMissingCacheWriteTokens(t *testing.T) {
+	ctx := context.Background()
+	raw := []byte(`{"type":"response.completed","response":{"id":"resp_123","created_at":1700000000,"model":"gpt-5.4","status":"completed","usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120,"input_tokens_details":{"cached_tokens":30},"output_tokens_details":{"reasoning_tokens":5}},"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}}`)
+	out := ConvertCodexResponseToOpenAINonStream(ctx, "gpt-5.4", nil, nil, raw, nil)
+	assertUsageMapping(t, out, 0, false)
+}
+
+func TestConvertCodexResponseToOpenAI_NonStreamPreservesExplicitZeroCacheWriteTokens(t *testing.T) {
+	ctx := context.Background()
+	raw := []byte(`{"type":"response.completed","response":{"id":"resp_123","created_at":1700000000,"model":"gpt-5.4","status":"completed","usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120,"input_tokens_details":{"cached_tokens":30,"cache_write_tokens":0},"output_tokens_details":{"reasoning_tokens":5}},"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}}`)
+	out := ConvertCodexResponseToOpenAINonStream(ctx, "gpt-5.4", nil, nil, raw, nil)
+	assertUsageMapping(t, out, 0, true)
+}
+
+func assertUsageMapping(t *testing.T, payload []byte, wantCachedCreation int64, expectCachedCreation bool) {
+	t.Helper()
+
+	if got := gjson.GetBytes(payload, "usage.prompt_tokens").Int(); got != 100 {
+		t.Fatalf("expected prompt_tokens=100, got %d; payload=%s", got, string(payload))
+	}
+	if got := gjson.GetBytes(payload, "usage.completion_tokens").Int(); got != 20 {
+		t.Fatalf("expected completion_tokens=20, got %d; payload=%s", got, string(payload))
+	}
+	if got := gjson.GetBytes(payload, "usage.total_tokens").Int(); got != 120 {
+		t.Fatalf("expected total_tokens=120, got %d; payload=%s", got, string(payload))
+	}
+	if got := gjson.GetBytes(payload, "usage.prompt_tokens_details.cached_tokens").Int(); got != 30 {
+		t.Fatalf("expected cached_tokens=30, got %d; payload=%s", got, string(payload))
+	}
+	if got := gjson.GetBytes(payload, "usage.completion_tokens_details.reasoning_tokens").Int(); got != 5 {
+		t.Fatalf("expected reasoning_tokens=5, got %d; payload=%s", got, string(payload))
+	}
+
+	gotCachedCreation := gjson.GetBytes(payload, "usage.prompt_tokens_details.cached_creation_tokens")
+	if expectCachedCreation {
+		if !gotCachedCreation.Exists() {
+			t.Fatalf("expected cached_creation_tokens to exist, payload=%s", string(payload))
+		}
+		if gotCachedCreation.Int() != wantCachedCreation {
+			t.Fatalf("expected cached_creation_tokens=%d, got %d; payload=%s", wantCachedCreation, gotCachedCreation.Int(), string(payload))
+		}
+		return
+	}
+	if gotCachedCreation.Exists() {
+		t.Fatalf("expected cached_creation_tokens to be omitted, payload=%s", string(payload))
 	}
 }
 

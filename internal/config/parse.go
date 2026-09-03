@@ -63,6 +63,7 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	if cfg.RemoteManagement.PanelGitHubRepository == "" {
 		cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
 	}
+	cfg.RemoteManagement.PublicCallbackBaseURL = strings.TrimSpace(cfg.RemoteManagement.PublicCallbackBaseURL)
 
 	cfg.Pprof.Addr = strings.TrimSpace(cfg.Pprof.Addr)
 	if cfg.Pprof.Addr == "" {

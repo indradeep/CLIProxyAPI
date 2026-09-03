@@ -137,6 +137,18 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 	// Stream configuration to enable or disable streaming responses
 	out, _ = sjson.SetBytes(out, "stream", stream)
 
+	// Cursor can send Anthropic-native envelope fields through the OpenAI-compatible
+	// endpoint. Preserve only the native fields Claude accepts; explicit native
+	// values take precedence over their OpenAI compatibility counterparts.
+	for _, field := range []string{"thinking", "output_config", "betas"} {
+		if value := root.Get(field); value.Exists() {
+			out, _ = sjson.SetRawBytes(out, field, []byte(value.Raw))
+		}
+	}
+
+	systemBlocks := claudeNativeSystemBlocks(root.Get("system"))
+	messageAccumulator := common.NewClaudeMessageAccumulator(int(root.Get("messages.#").Int()))
+
 	// Process messages and transform them to Claude Code format
 	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
 		lastToolMessage := map[string]gjson.Result{}
@@ -151,8 +163,6 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 		})
 		emittedToolResults := map[string]struct{}{}
 
-		systemBlocks := make([][]byte, 0)
-		messageAccumulator := common.NewClaudeMessageAccumulator(int(root.Get("messages.#").Int()))
 		messages.ForEach(func(_, message gjson.Result) bool {
 			role := message.Get("role").String()
 			contentResult := message.Get("content")
@@ -206,7 +216,7 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 					contentBlocks = append(contentBlocks, part)
 				} else if contentResult.Exists() && contentResult.IsArray() {
 					contentResult.ForEach(func(_, part gjson.Result) bool {
-						claudePart := convertOpenAIContentPartToClaudePart(part)
+						claudePart := convertOpenAIContentPartToClaudePart(part, role)
 						if claudePart != "" {
 							contentBlocks = append(contentBlocks, []byte(claudePart))
 						}
@@ -291,20 +301,21 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 			return true
 		})
 
-		messageBlocks := messageAccumulator.Messages()
+	}
 
-		// Preserve a minimal conversational turn for system-only inputs.
-		// Claude payloads with top-level system instructions but no messages are risky for downstream validation.
-		if len(messageBlocks) == 0 && len(systemBlocks) > 0 {
-			messageBlocks = append(messageBlocks, []byte(`{"role":"user","content":[{"type":"text","text":""}]}`))
-		}
+	messageBlocks := messageAccumulator.Messages()
 
-		if len(systemBlocks) > 0 {
-			out, _ = sjson.SetRawBytes(out, "system", common.JoinRawArray(systemBlocks))
-		}
-		if len(messageBlocks) > 0 {
-			out = common.SetRawArrayItems(out, "messages", messageBlocks)
-		}
+	// Preserve a minimal conversational turn for system-only inputs.
+	// Claude payloads with top-level system instructions but no messages are risky for downstream validation.
+	if len(messageBlocks) == 0 && len(systemBlocks) > 0 {
+		messageBlocks = append(messageBlocks, []byte(`{"role":"user","content":[{"type":"text","text":""}]}`))
+	}
+
+	if len(systemBlocks) > 0 {
+		out, _ = sjson.SetRawBytes(out, "system", common.JoinRawArray(systemBlocks))
+	}
+	if len(messageBlocks) > 0 {
+		out = common.SetRawArrayItems(out, "messages", messageBlocks)
 	}
 
 	// Tools mapping: OpenAI tools -> Claude Code tools
@@ -329,6 +340,8 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 				}
 
 				anthropicTools = append(anthropicTools, anthropicTool)
+			} else if isNativeClaudeTool(tool) {
+				anthropicTools = append(anthropicTools, common.AttachCacheControl([]byte(tool.Raw), tool))
 			}
 			return true
 		})
@@ -354,12 +367,16 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 				out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"any"}`))
 			}
 		case gjson.JSON:
-			// Specific tool choice mapping
-			if toolChoice.Get("type").String() == "function" {
+			// Specific tool choice mapping. Cursor may already send Claude's
+			// native auto/any/tool shapes through this endpoint.
+			switch toolChoice.Get("type").String() {
+			case "function":
 				functionName := toolChoice.Get("function.name").String()
 				toolChoiceJSON := []byte(`{"type":"tool","name":""}`)
 				toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "name", functionName)
 				out, _ = sjson.SetRawBytes(out, "tool_choice", toolChoiceJSON)
+			case "auto", "any", "tool":
+				out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(toolChoice.Raw))
 			}
 		default:
 		}
@@ -368,7 +385,39 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 	return out
 }
 
-func convertOpenAIContentPartToClaudePart(part gjson.Result) string {
+func claudeNativeSystemBlocks(system gjson.Result) [][]byte {
+	blocks := make([][]byte, 0)
+	if !system.Exists() {
+		return blocks
+	}
+	if system.Type == gjson.String {
+		block := []byte(`{"type":"text","text":""}`)
+		block, _ = sjson.SetBytes(block, "text", system.String())
+		return append(blocks, block)
+	}
+	if !system.IsArray() {
+		return blocks
+	}
+	system.ForEach(func(_, part gjson.Result) bool {
+		if part.IsObject() && part.Get("type").String() == "text" {
+			blocks = append(blocks, []byte(part.Raw))
+		}
+		return true
+	})
+	return blocks
+}
+
+func isNativeClaudeTool(tool gjson.Result) bool {
+	if !tool.IsObject() {
+		return false
+	}
+	if toolType := strings.TrimSpace(tool.Get("type").String()); toolType != "" {
+		return toolType != "function"
+	}
+	return strings.TrimSpace(tool.Get("name").String()) != "" && tool.Get("input_schema").Exists()
+}
+
+func convertOpenAIContentPartToClaudePart(part gjson.Result, role string) string {
 	var claudePart []byte
 	switch part.Get("type").String() {
 	case "text":
@@ -392,6 +441,16 @@ func convertOpenAIContentPartToClaudePart(part gjson.Result) string {
 				docPart, _ = sjson.SetBytes(docPart, "source.data", data)
 				claudePart = docPart
 			}
+		}
+
+	case "thinking", "redacted_thinking", "tool_use", "server_tool_use", "web_search_tool_result", "code_execution_tool_result":
+		if role == "assistant" {
+			claudePart = []byte(part.Raw)
+		}
+
+	case "tool_result":
+		if role == "user" {
+			claudePart = []byte(part.Raw)
 		}
 	}
 
@@ -448,7 +507,7 @@ func convertOpenAIToolResultContent(content gjson.Result) (string, bool) {
 				return true
 			}
 
-			claudePart := convertOpenAIContentPartToClaudePart(part)
+			claudePart := convertOpenAIContentPartToClaudePart(part, "user")
 			if claudePart != "" {
 				claudeParts = append(claudeParts, []byte(claudePart))
 			}
@@ -463,7 +522,7 @@ func convertOpenAIToolResultContent(content gjson.Result) (string, bool) {
 	}
 
 	if content.IsObject() {
-		claudePart := convertOpenAIContentPartToClaudePart(content)
+		claudePart := convertOpenAIContentPartToClaudePart(content, "user")
 		if claudePart != "" {
 			return string(common.JoinRawArray([][]byte{[]byte(claudePart)})), true
 		}

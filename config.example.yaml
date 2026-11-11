@@ -103,6 +103,10 @@ management:
   # When false, only localhost can access management endpoints (a key is still required).
   allow-remote: false
 
+  # Optional public base URL used for OAuth callback forwarding behind a reverse proxy.
+  # Empty keeps the local listener callback URL.
+  public-callback-base-url: ""
+
   # Management key. If a plaintext value is provided here, it will be hashed on startup.
   # All management requests (even from localhost) require this key.
   # Leave empty to disable the Management API entirely (404 for /v0/management and /v8/management routes).

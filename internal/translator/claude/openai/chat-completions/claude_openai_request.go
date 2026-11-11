@@ -146,7 +146,13 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 	// Stream configuration to enable or disable streaming responses
 	_ = outDoc.Set("stream", stream)
 
-	systemBlocks := make([][]byte, 0)
+	// Preserve native Claude fields sent through the OpenAI-compatible endpoint.
+	for _, field := range []string{"thinking", "output_config", "betas"} {
+		if value := root.Get(field); value.Exists() {
+			_ = outDoc.SetRaw(field, value.Raw)
+		}
+	}
+	systemBlocks := claudeNativeSystemBlocks(root.Get("system"))
 	messageBlocks := make([][]byte, 0)
 
 	// Process messages and transform them to Claude Code format
@@ -225,7 +231,7 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 					contentBlocks = append(contentBlocks, part)
 				} else if contentResult.Exists() && contentResult.IsArray() {
 					contentResult.ForEach(func(_, part ojson.Result) bool {
-						if claudePart := convertOpenAIContentPartToClaudePart(part); claudePart != "" {
+						if claudePart := convertOpenAIContentPartToClaudePart(part, role); claudePart != "" {
 							contentBlocks = append(contentBlocks, []byte(claudePart))
 						} else if partType := part.Get("type").String(); partType == "text" {
 							if part.Get("cache_control").Exists() && len(contentBlocks) > 0 {
@@ -422,6 +428,8 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 				}
 
 				anthropicTools = append(anthropicTools, anthropicTool)
+			} else if isNativeClaudeTool(tool) {
+				anthropicTools = append(anthropicTools, common.AttachCacheControl([]byte(tool.Raw), tool))
 			}
 			return true
 		})
@@ -459,9 +467,9 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 			switch choiceType {
 			case "none":
 				_ = outDoc.SetRaw("tool_choice", `{"type":"none"}`)
-			case "auto":
-				_ = outDoc.SetRaw("tool_choice", `{"type":"auto"}`)
-			case "required", "any":
+			case "auto", "any", "tool":
+				_ = outDoc.SetRaw("tool_choice", toolChoice.Raw)
+			case "required":
 				_ = outDoc.SetRaw("tool_choice", `{"type":"any"}`)
 			case "function":
 				functionName := toolChoice.Get("function.name").String()
@@ -493,7 +501,39 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 	return thinking.ApplyTranslatedSummaryToClaude(outDoc.Bytes(), rawJSON, "openai", modelName), nothingLeftErr
 }
 
-func convertOpenAIContentPartToClaudePartRaw(part ojson.Result) []byte {
+func claudeNativeSystemBlocks(system ojson.Result) [][]byte {
+	blocks := make([][]byte, 0)
+	if !system.Exists() {
+		return blocks
+	}
+	if system.Type == ojson.String {
+		block := ojson.NewDoc([]byte(`{"type":"text","text":""}`))
+		_ = block.Set("text", system.String())
+		return append(blocks, block.Bytes())
+	}
+	if !system.IsArray() {
+		return blocks
+	}
+	system.ForEach(func(_, part ojson.Result) bool {
+		if part.IsObject() && part.Get("type").String() == "text" {
+			blocks = append(blocks, []byte(part.Raw))
+		}
+		return true
+	})
+	return blocks
+}
+
+func isNativeClaudeTool(tool ojson.Result) bool {
+	if !tool.IsObject() {
+		return false
+	}
+	if toolType := strings.TrimSpace(tool.Get("type").String()); toolType != "" {
+		return toolType != "function"
+	}
+	return strings.TrimSpace(tool.Get("name").String()) != "" && tool.Get("input_schema").Exists()
+}
+
+func convertOpenAIContentPartToClaudePartRaw(part ojson.Result, role string) []byte {
 	switch part.Get("type").String() {
 	case "text":
 		txt := part.Get("text").String()
@@ -504,6 +544,14 @@ func convertOpenAIContentPartToClaudePartRaw(part ojson.Result) []byte {
 		textPart, _ = ojson.SetBytes(textPart, "text", txt)
 		return textPart
 
+	case "thinking", "redacted_thinking", "tool_use", "server_tool_use", "web_search_tool_result", "code_execution_tool_result":
+		if role == "assistant" {
+			return []byte(part.Raw)
+		}
+	case "tool_result":
+		if role == "user" {
+			return []byte(part.Raw)
+		}
 	case "image_url":
 		return []byte(convertOpenAIImageURLToClaudePart(part.Get("image_url.url").String()))
 
@@ -525,8 +573,8 @@ func convertOpenAIContentPartToClaudePartRaw(part ojson.Result) []byte {
 	return nil
 }
 
-func convertOpenAIContentPartToClaudePart(part ojson.Result) string {
-	claudePart := convertOpenAIContentPartToClaudePartRaw(part)
+func convertOpenAIContentPartToClaudePart(part ojson.Result, role string) string {
+	claudePart := convertOpenAIContentPartToClaudePartRaw(part, role)
 	if len(claudePart) == 0 {
 		return ""
 	}
@@ -585,7 +633,7 @@ func convertOpenAIToolResultContent(content ojson.Result) (string, bool) {
 				return true
 			}
 
-			if claudePart := convertOpenAIContentPartToClaudePartRaw(part); len(claudePart) > 0 {
+			if claudePart := convertOpenAIContentPartToClaudePartRaw(part, "user"); len(claudePart) > 0 {
 				claudeParts = append(claudeParts, claudePart)
 			} else if part.Get("type").String() == "text" {
 				droppedEmptyText = true
@@ -604,7 +652,7 @@ func convertOpenAIToolResultContent(content ojson.Result) (string, bool) {
 	}
 
 	if content.IsObject() {
-		if claudePart := convertOpenAIContentPartToClaudePartRaw(content); len(claudePart) > 0 {
+		if claudePart := convertOpenAIContentPartToClaudePartRaw(content, "user"); len(claudePart) > 0 {
 			return string(common.JoinRawArray([][]byte{claudePart})), true
 		}
 		return content.Raw, false
